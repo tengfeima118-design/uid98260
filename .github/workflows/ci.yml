@@ -27,11 +27,11 @@ jobs:
       - name: Verify patch markers
         run: |
           set -e
-          echo "=== EV ids ==="
+          echo "--- EV ids ---"
           grep -E 'define EV_CACHE' src/device_config.h
-          echo "=== free-intercept count ==="
+          echo "--- free-intercept count ---"
           grep -c 'PGT-AN20 PATCH' src/cve-2026-98260-uid0.c
-          echo "=== free id-whitelist count ==="
+          echo "--- free id-whitelist count ---"
           grep -c 'if (type == EV_CACHE_FREE)' src/cve-2026-98260-uid0.c
 
       - name: Build
@@ -43,18 +43,11 @@ jobs:
               -pthread -I src -o /tmp/uid0 src/cve-2026-98260-uid0.c 2>&1 | tee /tmp/build.log
           ls -la /tmp/uid0
 
-      - name: Post-process (TLS align) + summary
-        run: python3 gha_post.py
-
       - name: Strip
         run: |
           set -e
           $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip /tmp/uid0 2>/dev/null || true
           ls -la /tmp/uid0
-          sha256sum /tmp/uid0
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: uid0-pgt20
-          path: /tmp/uid0
+      - name: Post-process + emit chunks
+        run: python3 gha_post.py
