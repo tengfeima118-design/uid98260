@@ -1,0 +1,60 @@
+name: build-98260-pgt20
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NDK
+        run: |
+          set -e
+          curl -sSLo /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip -q /tmp/ndk.zip -d /opt
+          echo "NDK=/opt/android-ndk-r26d" >> $GITHUB_ENV
+
+      - name: Extract source
+        run: |
+          set -e
+          mkdir -p src
+          base64 -d exploit.b64 > /tmp/src.tar.gz
+          tar xzf /tmp/src.tar.gz -C src
+          ls -la src/
+
+      - name: Verify patch markers
+        run: |
+          set -e
+          echo "=== EV ids ==="
+          grep -E 'define EV_CACHE' src/device_config.h
+          echo "=== free-intercept count ==="
+          grep -c 'PGT-AN20 PATCH' src/cve-2026-98260-uid0.c
+          echo "=== free id-whitelist count ==="
+          grep -c 'if (type == EV_CACHE_FREE)' src/cve-2026-98260-uid0.c
+
+      - name: Build
+        run: |
+          set -e
+          CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang
+          $CC -O2 -static -fno-pie -no-pie -D_GNU_SOURCE \
+              -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
+              -pthread -I src -o /tmp/uid0 src/cve-2026-98260-uid0.c 2>&1 | tee /tmp/build.log
+          ls -la /tmp/uid0
+
+      - name: Post-process (TLS align) + summary
+        run: python3 gha_post.py
+
+      - name: Strip
+        run: |
+          set -e
+          $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip /tmp/uid0 2>/dev/null || true
+          ls -la /tmp/uid0
+          sha256sum /tmp/uid0
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uid0-pgt20
+          path: /tmp/uid0
