@@ -1,0 +1,36 @@
+name: build-probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+
+      - name: Build static aarch64 binary
+        run: |
+          aarch64-linux-gnu-gcc -O2 -static -o probe_wacom_bind probe_wacom_bind.c
+          file probe_wacom_bind
+          ls -la probe_wacom_bind
+          echo "--- sha256 ---"
+          sha256sum probe_wacom_bind | tee sha_probe.txt
+          echo "--- base64 split ---"
+          base64 -w0 probe_wacom_bind > probe.b64
+          wc -c probe.b64
+          split -b 900000 probe.b64 pb_
+          ls -la pb_*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-bin
+          path: |
+            probe_wacom_bind
+            sha_probe.txt
