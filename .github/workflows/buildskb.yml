@@ -1,0 +1,21 @@
+name: build-skb
+
+on:
+  workflow_dispatch:
+
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc -O2 -static -o skb_probe skb_probe.c
+          sha256sum skb_probe | tee shaskb.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skb
+          path: |
+            skb_probe
+            shaskb.txt
