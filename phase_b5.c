@@ -171,7 +171,7 @@ int main(int argc, char **argv) {
 
     int fdp=open("/dev/uhid",O_RDWR|O_CLOEXEC);
     if (fdp<0){perror("uhid");return 4;}
-    if (uhid_create(fdp,"b5-pad",PHYS_COMMON,0x1102,rdesc_pad,sizeof(rdesc_pad))<0){printf("pad fail\n");return 5;}
+    if (uhid_create(fdp,"b5-pad",0x1102,rdesc_pad,sizeof(rdesc_pad))<0){printf("pad fail\n");return 5;}
     pump(fdp,100); usleep(200000); pump(fdp,30);
     printf("pad created\n"); fflush(stdout);
 
@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
         int fdt=open("/dev/uhid",O_RDWR|O_CLOEXEC);
         if (fdt<0) break;
         char nm[32]; snprintf(nm,sizeof(nm),"b5-t%02d",r);
-        if (uhid_create(fdt,nm,PHYS_COMMON,0x1100+r,rdesc_touch,sizeof(rdesc_touch))<0){close(fdt);break;}
+        if (uhid_create(fdt,nm,0x1100+r,rdesc_touch,sizeof(rdesc_touch))<0){close(fdt);break;}
         pump(fdt,40); usleep(20000); pump(fdt,10);
         uhid_destroy(fdt); close(fdt);
 
