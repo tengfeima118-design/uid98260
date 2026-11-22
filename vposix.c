@@ -10,9 +10,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+#define TR "/sys/kernel/tracing"
 
 static int wr(const char *p, const char *v)
 {
@@ -47,7 +48,7 @@ static void slab_posix(const char *tag)
 static int count_in(const char *path, const char *needle)
 {
 	FILE *f = fopen(path, "r");
-	char ln[1024];
+	char ln[2048];
 	int n = 0;
 
 	if (!f)
@@ -59,53 +60,57 @@ static int count_in(const char *path, const char *needle)
 	return n;
 }
 
+static int read_int(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	int v = -1;
+
+	if (f) {
+		if (fscanf(f, "%d", &v) != 1)
+			v = -1;
+		fclose(f);
+	}
+	return v;
+}
+
 int main(int argc, char **argv)
 {
-	const char *TR = "/sys/kernel/tracing";
 	int N = argc > 1 ? atoi(argv[1]) : 3000;
-	timer_t *ids = calloc(N, sizeof(timer_t));
+	timer_t *ids;
 	struct sigevent ev;
 	int made = 0, i;
-	char p[256];
+	size_t sz = 16u << 20;
+	char *m;
 
+	ids = calloc((size_t)N, sizeof(timer_t));
+	if (!ids) {
+		printf("calloc fail\n");
+		return 1;
+	}
 	memset(&ev, 0, sizeof(ev));
 	ev.sigev_notify = SIGEV_NONE;
 
 	printf("=== before ===\n");
 	slab_posix("slab-pre");
 	printf("[trace] tracing_on=%d rss_enable=%d\n",
-	       count_in(TR "/tracing_on", "1") >= 0 ? -2 : -3, -3);
+	       read_int(TR "/tracing_on"),
+	       read_int(TR "/events/kmem/rss_stat/enable"));
 
-	/* 读状态 */
-	{
-		FILE *f = fopen(TR "/tracing_on", "r");
-		int v = -1;
-
-		if (f) {
-			if (fscanf(f, "%d", &v) != 1)
-				v = -1;
-			fclose(f);
-		}
-		printf("[trace] tracing_on=%d\n", v);
-	}
-
-	/* 打开 holder 和 tracing（顺序：先 holder 再 tracing） */
-	printf("wr rss_stat/enable = %d\n", wr(TR "/events/kmem/rss_stat/enable", "1"));
-	printf("wr tracing_on      = %d\n", wr(TR "/tracing_on", "1"));
-	printf("wr trace(clear)    = %d\n", wr(TR "/trace", ""));
+	printf("wr rss_enable = %d\n", wr(TR "/events/kmem/rss_stat/enable", "1"));
+	printf("wr tracing_on = %d\n", wr(TR "/tracing_on", "1"));
+	printf("wr clear      = %d\n", wr(TR "/trace", ""));
 
 	/* 触发一次 rss 变化，让 trigger 里的 enable_event 真正执行 */
-	{
-		size_t sz = 16u << 20;
-		char *m = malloc(sz);
-
-		if (m) {
-			for (size_t k = 0; k < sz; k += 4096)
-				m[k] = 1;
-			free(m);
-		}
+	m = malloc(sz);
+	if (m) {
+		for (size_t k = 0; k < sz; k += 4096)
+			m[k] = 1;
+		free(m);
 	}
 	usleep(200000);
+	printf("[after rss] rss_enable=%d tracing_on=%d\n",
+	       read_int(TR "/events/kmem/rss_stat/enable"),
+	       read_int(TR "/tracing_on"));
 
 	printf("=== create %d timers ===\n", N);
 	for (i = 0; i < N; i++) {
@@ -123,25 +128,52 @@ int main(int argc, char **argv)
 		timer_delete(ids[i]);
 	printf("deleted\n");
 	usleep(200000);
-	slab_posix("slab-post-del-200ms");
+	slab_posix("slab-del-200ms");
 	usleep(1600000);
-	slab_posix("slab-post-del-1.8s");
+	slab_posix("slab-del-1.8s");
 
 	printf("=== trace 统计 ===\n");
-	printf("kfree lines  = %d\n", count_in(TR "/trace", "kmem_cache_free"));
-	printf("posix lines  = %d\n", count_in(TR "/trace", "posix_timers"));
-	printf("entries      = ");
+	printf("kfree_lines = %d\n", count_in(TR "/trace", "kmem_cache_free"));
+	printf("posix_lines = %d\n", count_in(TR "/trace", "posix_timers"));
+	printf("entries     = %d (buffer lines)\n", count_in(TR "/trace", ":"));
 	fflush(stdout);
-	snprintf(p, sizeof(p), "grep -m1 entries-in-buffer %s/trace", TR);
+
+	/* 打印前 3 条 posix 行 */
 	{
-		FILE *f = popen(p, "r");
-		char b[256];
+		FILE *f = fopen(TR "/trace", "r");
+		char ln[2048];
+		int shown = 0;
 
 		if (f) {
-			if (fgets(b, sizeof(b), f))
-				printf("%s", b);
-			pclose(f);
+			while (fgets(ln, sizeof(ln), f) && shown < 3) {
+				if (strstr(ln, "posix_timers")) {
+					printf("[posix] %s", ln);
+					shown++;
+				}
+			}
+			fclose(f);
 		}
+		if (!shown)
+			printf("[posix] 无记录\n");
 	}
+	/* 顺便打印前 3 条 free 行，确认事件在工作 */
+	{
+		FILE *f = fopen(TR "/trace", "r");
+		char ln[2048];
+		int shown = 0;
+
+		if (f) {
+			while (fgets(ln, sizeof(ln), f) && shown < 3) {
+				if (strstr(ln, "kmem_cache_free")) {
+					printf("[kfree] %s", ln);
+					shown++;
+				}
+			}
+			fclose(f);
+		}
+		if (!shown)
+			printf("[kfree] 无记录\n");
+	}
+	free(ids);
 	return 0;
 }
