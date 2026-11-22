@@ -1,0 +1,21 @@
+name: build-uaf
+
+on:
+  workflow_dispatch:
+
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc -O2 -static -o uaf99491 uaf99491.c
+          sha256sum uaf99491 | tee shauaf.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uaf
+          path: |
+            uaf99491
+            shauaf.txt
