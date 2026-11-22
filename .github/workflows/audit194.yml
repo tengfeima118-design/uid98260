@@ -6,66 +6,37 @@ on:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup deps
         run: |
-          set -e
           python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
           python3 -c "import elftools, capstone; print('deps ok')"
 
       - name: Fetch kernel from Honor OTA
         run: |
-          set -e
           python3 fetch_and_audit.py 2>&1 | tail -60
-          echo '--- artifacts ---'
           ls -la kernel.bin boot.img 2>/dev/null || true
 
-      - name: Convert to ELF with symbols
+      - name: Convert to ELF
         run: |
-          set -e
-          ls -la kernel.bin
-          python3 -m vmlinux_to_elf --help >/dev/null 2>&1 || true
-          which vmlinux-to-elf || true
-          vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -20 || \
-            python3 -c "
-from vmlinux_to_elf.main import main
-import sys
-sys.argv=['x','kernel.bin','vmlinux.elf']
-main()
-" 2>&1 | tail -20
-          echo '--- elf ---'
-          ls -la vmlinux.elf 2>/dev/null || echo 'ELF FAILED'
+          ls -la kernel.bin || exit 1
+          vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -15 || echo 'ELF FAIL'
+          ls -la vmlinux.elf 2>/dev/null || echo 'no elf'
 
-      - name: Audit three targets
+      - name: Audit
         run: |
-          set -e
           if [ -f vmlinux.elf ]; then
-            python3 audit_194.py vmlinux.elf 2>&1 | head -300
+            python3 audit_194.py vmlinux.elf 2>&1 | head -400
           else
-            echo 'no vmlinux.elf, fallback: raw kernel disasm'
+            echo 'no elf; raw scan'
             python3 - <<'PY'
-import struct, subprocess, sys
-try:
-    from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-except ImportError:
-    sys.exit('no capstone')
-
 data = open('kernel.bin','rb').read()
 print('kernel size', len(data))
-# 找 Image 头: ARM64 Image 以 0x91000000 (mov x0,x0?) 或特定 magic 开头
-# 更稳: 找 "Linux version " 定位 .rodata，再从 Image 头算 _text
 pos = data.find(b'Linux version ')
 print('Linux version at', pos)
 if pos > 0:
-    print(data[pos:pos+100])
+    print(data[pos:pos+120])
 PY
           fi
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "=== files ==="
-          ls -la
