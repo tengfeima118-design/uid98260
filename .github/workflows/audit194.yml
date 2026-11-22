@@ -1,4 +1,4 @@
-name: audit-194
+name: audit194
 
 on:
   workflow_dispatch:
@@ -10,33 +10,23 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup deps
-        run: |
-          python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
-          python3 -c "import elftools, capstone; print('deps ok')"
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
 
       - name: Fetch kernel from Honor OTA
         run: |
           python3 fetch_and_audit.py 2>&1 | tail -60
-          ls -la kernel.bin boot.img 2>/dev/null || true
+          ls -la kernel.bin 2>/dev/null || true
 
       - name: Convert to ELF
         run: |
           ls -la kernel.bin || exit 1
-          vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -15 || echo 'ELF FAIL'
-          ls -la vmlinux.elf 2>/dev/null || echo 'no elf'
+          vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -15 || true
+          ls -la vmlinux.elf 2>/dev/null || echo NOELF
 
       - name: Audit
         run: |
           if [ -f vmlinux.elf ]; then
             python3 audit_194.py vmlinux.elf 2>&1 | head -400
           else
-            echo 'no elf; raw scan'
-            python3 - <<'PY'
-data = open('kernel.bin','rb').read()
-print('kernel size', len(data))
-pos = data.find(b'Linux version ')
-print('Linux version at', pos)
-if pos > 0:
-    print(data[pos:pos+120])
-PY
+            python3 raw_scan.py 2>&1 | head -50
           fi
