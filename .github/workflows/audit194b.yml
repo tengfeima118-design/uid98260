@@ -1,0 +1,35 @@
+name: audit194b
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup deps
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+
+      - name: Assemble kernel
+        run: |
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] && echo "SHA OK" || { echo "SHA MISMATCH"; exit 1; }
+
+      - name: Convert to ELF
+        run: vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -5
+
+      - name: dump wacom_remove full
+        run: python3 dump_full.py vmlinux.elf wacom_remove 2>&1 | head -100
+
+      - name: dump wacom_remove and resolve call targets
+        run: python3 resolve_calls.py vmlinux.elf wacom_remove 2>&1 | head -60
+
+      - name: dump exit_itimers calls
+        run: python3 resolve_calls.py vmlinux.elf exit_itimers 2>&1 | head -60
+
+      - name: dump posix_cpu_timers_exit calls
+        run: python3 resolve_calls.py vmlinux.elf posix_cpu_timers_exit 2>&1 | head -40
