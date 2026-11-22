@@ -1,53 +1,42 @@
-name: build-98260-pgt20
+name: audit-194
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup NDK
+      - name: Setup deps
         run: |
-          set -e
-          curl -sSLo /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
-          unzip -q /tmp/ndk.zip -d /opt
-          echo "NDK=/opt/android-ndk-r26d" >> $GITHUB_ENV
+          python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+          python3 -c "import elftools, capstone; print('deps ok')"
 
-      - name: Extract source
+      - name: Fetch kernel from Honor OTA
         run: |
-          set -e
-          mkdir -p src
-          base64 -d exploit.b64 > /tmp/src.tar.gz
-          tar xzf /tmp/src.tar.gz -C src
-          ls -la src/
+          python3 fetch_and_audit.py 2>&1 | tail -60
+          ls -la kernel.bin boot.img 2>/dev/null || true
 
-      - name: Verify patch markers
+      - name: Convert to ELF
         run: |
-          set -e
-          echo "--- EV ids ---"
-          grep -E 'define EV_CACHE' src/device_config.h
-          echo "--- free-intercept count ---"
-          grep -c 'PGT-AN20 PATCH' src/cve-2026-98260-uid0.c
-          echo "--- free id-whitelist count ---"
-          grep -c 'if (type == EV_CACHE_FREE)' src/cve-2026-98260-uid0.c
+          ls -la kernel.bin || exit 1
+          vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -15 || echo 'ELF FAIL'
+          ls -la vmlinux.elf 2>/dev/null || echo 'no elf'
 
-      - name: Build
+      - name: Audit
         run: |
-          set -e
-          CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang
-          $CC -O2 -static -fno-pie -no-pie -D_GNU_SOURCE \
-              -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
-              -pthread -I src -o /tmp/uid0 src/cve-2026-98260-uid0.c 2>&1 | tee /tmp/build.log
-          ls -la /tmp/uid0
-
-      - name: Strip
-        run: |
-          set -e
-          $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip /tmp/uid0 2>/dev/null || true
-          ls -la /tmp/uid0
-
-      - name: Post-process + emit chunks
-        run: python3 gha_post.py
+          if [ -f vmlinux.elf ]; then
+            python3 audit_194.py vmlinux.elf 2>&1 | head -400
+          else
+            echo 'no elf; raw scan'
+            python3 - <<'PY'
+data = open('kernel.bin','rb').read()
+print('kernel size', len(data))
+pos = data.find(b'Linux version ')
+print('Linux version at', pos)
+if pos > 0:
+    print(data[pos:pos+120])
+PY
+          fi
