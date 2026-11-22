@@ -1,0 +1,40 @@
+name: audit_inputdev
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup deps
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+
+      - name: Assemble kernel
+        run: |
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] && echo "SHA OK" || { echo "SHA MISMATCH"; exit 1; }
+
+      - name: Convert to ELF
+        run: vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -3
+
+      - name: input_event write path
+        run: |
+          echo '=== input_event: vals 写入与 num_vals 比较 ==='
+          python3 dump_full.py vmlinux.elf input_event 2>&1 | grep -E 'str|ldr .*#0x570|#0x568|#0x56c|cmp|bl ' | head -40
+
+      - name: input_handle_event switch path
+        run: |
+          echo '=== input_handle_event: EV_SW 分支与 vals 写 ==='
+          python3 dump_full.py vmlinux.elf input_handle_event 2>&1 | grep -E '#0x570|#0x568|#0x56c|str .*\[x|add .*#0xa0|#0x1c0|#0xc8' | head -40
+
+      - name: input_sync
+        run: |
+          echo '=== input_sync 调用链 ==='
+          python3 resolve_calls.py vmlinux.elf input_sync 2>&1 | head -20
+          echo '--- input_event 调用者 ---'
+          python3 resolve_calls.py vmlinux.elf input_event 2>&1 | head -12
