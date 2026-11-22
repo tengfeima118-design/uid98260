@@ -1,0 +1,40 @@
+name: audit98499b
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup deps
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+
+      - name: Assemble kernel
+        run: |
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] && echo "SHA OK" || { echo "SHA MISMATCH"; exit 1; }
+
+      - name: Convert to ELF
+        run: vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -3
+
+      - name: dev_warn 前后上下文
+        run: |
+          echo '=== wacom_wac_pen_event: 4 个 _dev_warn 的上下文 ==='
+          python3 dump_full.py vmlinux.elf wacom_wac_pen_event 2>&1 | sed -n '/0x2bf874/,/0x2bf920/p'
+
+      - name: 串口索引数组访问
+        run: |
+          echo '=== 找 serial[0..] 的数组写 (str wX, [xY, xZ, lsl #2]) ==='
+          python3 dump_full.py vmlinux.elf wacom_wac_pen_event 2>&1 | grep -nE 'lsl #2|strb|cmp .*#0x100|lsl #12' | head -20
+
+      - name: 上游修复对照 - 查 dev_warn 字符串
+        run: |
+          echo '=== .rodata 里 wacom serial 相关告警字符串 ==='
+          strings -a vmlinux.elf 2>/dev/null | grep -iE 'serial.*(invalid|out of|range|overflow)|Invalid.*serial|too many.*serial' | head -10
+          echo '--- 备选：所有 wacom 告警 ---'
+          strings -a vmlinux.elf 2>/dev/null | grep -iE 'wacom' | grep -iE 'warn|invalid|out of' | head -10
