@@ -138,7 +138,9 @@ int main(int argc, char **argv) {
     int made = 0;
     for (int i = 0; i < npair; i++) {
         sp[i][0] = sp[i][1] = -1;
-        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sp[i]) < 0) continue;
+        /* 用 SOCK_STREAM：其 skb 走 GFP_KERNEL（与 input_dev 同池）
+           而 SOCK_DGRAM 走 GFP_KERNEL_ACCOUNT（不同池，无法复用） */
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp[i]) < 0) continue;
         int sb = 4 << 20;
         setsockopt(sp[i][0], SOL_SOCKET, SO_SNDBUF, &sb, sizeof(sb));
         setsockopt(sp[i][1], SOL_SOCKET, SO_RCVBUF, &sb, sizeof(sb));
