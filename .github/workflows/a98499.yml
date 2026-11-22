@@ -1,0 +1,44 @@
+name: audit98499
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup deps
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+
+      - name: Assemble kernel
+        run: |
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] && echo "SHA OK" || { echo "SHA MISMATCH"; exit 1; }
+
+      - name: Convert to ELF
+        run: vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -3
+
+      - name: wacom_wac_pen_serial_enforce presence
+        run: |
+          echo '### 符号是否存在'
+          python3 resolve_calls.py vmlinux.elf wacom_wac_pen_serial_enforce 2>&1 | head -8
+
+      - name: wacom_wac_pen_event - look for serial array logic
+        run: |
+          echo '### wacom_wac_pen_event: 找 serial 索引与 usage_max 边界检查'
+          python3 dump_full.py vmlinux.elf wacom_wac_pen_event 2>&1 | grep -E 'cmp .*#0x100|cmp .*#0xff|ldr .*\[x.*lsl #2\]|add .*#0x58|lsl #2|str .*#0x' | head -30
+
+      - name: wacom_wac_pen_event full calls
+        run: python3 resolve_calls.py vmlinux.elf wacom_wac_pen_event 2>&1 | head -25
+
+      - name: 上层修复判据 (ef32877368a7 是 99491; 98499 查 usage_max clamp)
+        run: |
+          echo '### 搜 wacom 里有没有 usage_max / tool_serial 边界检查痕迹'
+          for f in wacom_wac_pen_event wacom_parse_and_register wacom_probe; do
+            echo "--- $f ---"
+            python3 dump_full.py vmlinux.elf $f 2>&1 | grep -cE 'cmp .*#0x100'
+          done
