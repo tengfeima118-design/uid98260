@@ -12,21 +12,26 @@ jobs:
       - name: Setup deps
         run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
 
-      - name: Fetch kernel from Honor OTA
+      - name: Assemble kernel from parts
         run: |
-          python3 fetch_and_audit.py 2>&1 | tail -60
-          ls -la kernel.bin 2>/dev/null || true
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          ls -la kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          echo "want=$WANT"
+          echo "got =$GOT"
+          if [ "$WANT" = "$GOT" ]; then echo "SHA OK"; else echo "SHA MISMATCH"; exit 1; fi
 
       - name: Convert to ELF
         run: |
-          ls -la kernel.bin || exit 1
-          vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -15 || true
+          vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -20 || true
           ls -la vmlinux.elf 2>/dev/null || echo NOELF
 
-      - name: Audit
+      - name: Audit three targets
         run: |
           if [ -f vmlinux.elf ]; then
-            python3 audit_194.py vmlinux.elf 2>&1 | head -400
+            python3 audit_194.py vmlinux.elf 2>&1 | head -500
           else
-            python3 raw_scan.py 2>&1 | head -50
+            echo "=== ELF 转换失败，走 raw kallsyms 自解析 ==="
+            python3 raw_kallsyms.py 2>&1 | head -60
           fi
