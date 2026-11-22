@@ -1,0 +1,42 @@
+name: build-vposix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NDK
+        run: |
+          set -e
+          curl -sSLo /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip -q /tmp/ndk.zip -d /opt
+          echo "NDK=/opt/android-ndk-r26d" >> $GITHUB_ENV
+
+      - name: Build
+        run: |
+          set -e
+          CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang
+          $CC -O2 -static -fno-pie -no-pie -D_GNU_SOURCE -o /tmp/vposix vposix.c 2>&1 | tee /tmp/b.log
+          ls -la /tmp/vposix
+
+      - name: Emit
+        run: |
+          set -e
+          SZ=$(stat -c%s /tmp/vposix)
+          SHA=$(sha256sum /tmp/vposix | cut -d' ' -f1)
+          B64=$(base64 -w0 /tmp/vposix)
+          BL=${#B64}
+          CH=$(( (BL + 29999) / 30000 ))
+          echo "SIZE=$SZ"
+          echo "SHA256=$SHA"
+          echo "B64LEN=$BL CHUNKS=$CH"
+          i=0
+          while [ $i -lt $CH ]; do
+            S=$((i*30000))
+            echo "CHUNK$(printf %03d $i)=${B64:$S:30000}"
+            i=$((i+1))
+          done
