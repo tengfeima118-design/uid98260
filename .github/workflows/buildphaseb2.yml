@@ -1,0 +1,23 @@
+name: build-phaseb2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc -O2 -static -o payload_build2 payload_build2.c
+          aarch64-linux-gnu-gcc -O2 -static -o phase_b2 phase_b2.c
+          ls -la payload_build2 phase_b2
+          sha256sum payload_build2 phase_b2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phaseb2
+          path: |
+            payload_build2
+            phase_b2
