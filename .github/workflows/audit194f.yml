@@ -1,0 +1,38 @@
+name: audit194f
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup deps
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+
+      - name: Assemble kernel
+        run: |
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] && echo "SHA OK" || { echo "SHA MISMATCH"; exit 1; }
+
+      - name: Convert to ELF
+        run: vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -3
+
+      - name: 99491 L1 DECISIVE - wacom_remove_shared_data calls
+        run: |
+          echo '### 修复后应有: synchronize_rcu'
+          python3 resolve_calls.py vmlinux.elf wacom_remove_shared_data 2>&1
+
+      - name: wacom_remove_shared_data full
+        run: python3 dump_full.py vmlinux.elf wacom_remove_shared_data 2>&1 | head -70
+
+      - name: wacom_set_shared_values tou
+        run: |
+          echo '### tou_input 写入点 (wacom_set_shared_values 是否有 __rcu/条件)'
+          python3 dump_full.py vmlinux.elf wacom_set_shared_values 2>&1 | grep -E 'str .*#0x10\]|#0x318|#0x320' | head -20
+          echo '--- calls ---'
+          python3 resolve_calls.py vmlinux.elf wacom_set_shared_values 2>&1 | head -20
