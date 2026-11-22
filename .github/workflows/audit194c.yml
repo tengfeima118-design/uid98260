@@ -1,0 +1,32 @@
+name: audit194c
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup deps
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+
+      - name: Assemble kernel
+        run: |
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] && echo "SHA OK" || { echo "SHA MISMATCH"; exit 1; }
+
+      - name: Convert to ELF
+        run: vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -3
+
+      - name: begin_new_exec call order (98260 new criterion)
+        run: python3 resolve_calls.py vmlinux.elf begin_new_exec 2>&1 | head -120
+
+      - name: wacom_remove touched fields (99491)
+        run: |
+          python3 dump_full.py vmlinux.elf wacom_remove 2>&1 | grep -E 'str .*xzr|stp .*xzr|strb|strh|ldr .*x19' | head -30
+          echo '--- wacom_wac_pad_event exists? ---'
+          python3 resolve_calls.py vmlinux.elf wacom_wac_event 2>&1 | head -5
