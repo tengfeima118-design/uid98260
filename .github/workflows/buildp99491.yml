@@ -1,0 +1,30 @@
+name: build-probe99491
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: |
+          aarch64-linux-gnu-gcc -O2 -static -o probe99491 probe99491.c
+          file probe99491
+          ls -la probe99491
+          sha256sum probe99491 | tee sha99491.txt
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe99491
+          path: |
+            probe99491
+            sha99491.txt
