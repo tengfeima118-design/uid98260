@@ -1,0 +1,41 @@
+name: audit194d
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup deps
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+
+      - name: Assemble kernel
+        run: |
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] && echo "SHA OK" || { echo "SHA MISMATCH"; exit 1; }
+
+      - name: Convert to ELF
+        run: vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -3
+
+      - name: 98260 begin_new_exec call order
+        run: |
+          echo '### begin_new_exec: 找出 de_thread / posix_cpu_timers_exit / exit_itimers / flush_itimer_signals 的相对顺序'
+          python3 resolve_calls.py vmlinux.elf begin_new_exec 2>&1 | head -140
+
+      - name: 99491 wacom_remove_shared_data presence
+        run: |
+          echo '### wacom_remove 的 bl 目标（是否含 wacom_remove_shared_data）'
+          python3 resolve_calls.py vmlinux.elf wacom_remove 2>&1 | head -40
+          echo
+          echo '### wacom_remove_shared_data 是否独立成函数'
+          python3 resolve_calls.py vmlinux.elf wacom_remove_shared_data 2>&1 | head -30
+
+      - name: wacom_wac_pad_event touch_input path
+        run: |
+          echo '### wacom_wac_pad_event 是否读 shared->touch_input (i.e. +0x10 from shared)'
+          python3 dump_full.py vmlinux.elf wacom_wac_pad_event 2>&1 | grep -E 'ldr .*#0x10\]|ldr .*#0x318\]|bl ' | head -40
