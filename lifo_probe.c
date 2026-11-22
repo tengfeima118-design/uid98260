@@ -61,6 +61,20 @@ static long now_us(void) {
     return ts.tv_sec * 1000000L + ts.tv_nsec / 1000L;
 }
 
+static long now_ms(void) { return now_us() / 1000L; }
+
+/* 统计 /dev/input 下 eventN 个数，用来确认 wacom 已绑定出 evdev */
+static int count_evdev(void) {
+    DIR *d = opendir("/dev/input");
+    struct dirent *de;
+    int n = 0;
+    if (!d) return -1;
+    while ((de = readdir(d)))
+        if (!strncmp(de->d_name, "event", 5)) n++;
+    closedir(d);
+    return n;
+}
+
 static int uhid_create(int fd, const char *name, const char *phys, unsigned pid,
                        const unsigned char *rd, size_t rl) {
     static struct uhid_event ev;
@@ -84,12 +98,25 @@ static int uhid_destroy(int fd) {
     return write(fd, &ev, sizeof(ev)) == sizeof(ev) ? 0 : -1;
 }
 
-static void pump(int fd) {
+static void pump(int fd, long ms, int do_start) {
+    long dl = now_ms() + ms;
     struct uhid_event ev;
-    for (;;) {
-        ssize_t r = read(fd, &ev, sizeof(ev));
-        if (r <= 0) break;
+    int fc = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fc | O_NONBLOCK);
+    while (now_ms() < dl) {
+        memset(&ev, 0, sizeof(ev));
+        ssize_t n = read(fd, &ev, sizeof(ev));
+        if (n > 0 && ev.type == UHID_START) {
+            /* 收到 START 后回一个 OPENED，驱动才会开始发数据 */
+            struct uhid_event o;
+            memset(&o, 0, sizeof(o));
+            o.type = UHID_OPENED;
+            write(fd, &o, sizeof(o));
+        } else if (n <= 0) {
+            usleep(1000);
+        }
     }
+    fcntl(fd, F_SETFL, fc);
 }
 
 int main(int argc, char **argv) {
@@ -135,12 +162,14 @@ int main(int argc, char **argv) {
         long t0 = now_us();
         if (uhid_create(fdt, "lifo-touch", PHYS_COMMON, 0x1101,
                         rdesc_touch, sizeof(rdesc_touch)) < 0) { printf("create t fail\n"); return 5; }
-        pump(fdt);
+        pump(fdt, 200, 1);
         if (uhid_create(fdp, "lifo-pad", PHYS_COMMON, 0x1102,
                         rdesc_pad, sizeof(rdesc_pad)) < 0) { printf("create p fail\n"); return 5; }
-        pump(fdp);
-        usleep(300000);   /* 等 wacom 绑定完成 */
-        pump(fdt); pump(fdp);
+        pump(fdp, 200, 1);
+        usleep(400000);   /* 等 wacom 绑定完成 */
+        pump(fdt, 50, 1); pump(fdp, 50, 1);
+        int n_ev = count_evdev();
+        printf("round%d evdev_count=%d\n", rd, n_ev);
 
         /* 关键：destroy 后立刻 spray，中间不做任何多余 syscall */
         long t1 = now_us();
