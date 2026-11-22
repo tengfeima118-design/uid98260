@@ -1,0 +1,37 @@
+name: audit99491g
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup deps
+        run: python3 -m pip install --quiet pyelftools capstone vmlinux-to-elf
+
+      - name: Assemble kernel
+        run: |
+          cat kb/p00 kb/p01 kb/p02 > kernel.bin
+          WANT=$(cat kb/sha.txt)
+          GOT=$(sha256sum kernel.bin | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] && echo "SHA OK" || { echo "SHA MISMATCH"; exit 1; }
+
+      - name: Convert to ELF
+        run: vmlinux-to-elf kernel.bin vmlinux.elf 2>&1 | tail -3
+
+      - name: who reads shared->touch_input (shared+0x10)
+        run: |
+          echo '=== 在所有 wacom 函数里找 ldr [*, #0x10] 配合 shared(+0x318) ==='
+          for f in wacom_wac_pad_event wacom_wac_event wacom_intuos_pad wacom_set_shared_values wacom_add_shared_data wacom_probe; do
+            echo "--- $f ---"
+            python3 dump_full.py vmlinux.elf $f 2>&1 | grep -E '#0x318|#0x10\]|input_report_switch|input_sync|0x328' | head -14
+          done
+
+      - name: wacom_set_shared_values full
+        run: python3 dump_full.py vmlinux.elf wacom_set_shared_values 2>&1 | head -70
+
+      - name: wacom_add_shared_data
+        run: python3 dump_full.py vmlinux.elf wacom_add_shared_data 2>&1 | grep -E 'str|ldr|bl ' | head -40
