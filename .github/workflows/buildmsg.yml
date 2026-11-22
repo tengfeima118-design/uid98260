@@ -1,0 +1,21 @@
+name: build-msg
+
+on:
+  workflow_dispatch:
+
+jobs:
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc -O2 -static -o msgspray msgspray.c
+          sha256sum msgspray | tee sham.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msg
+          path: |
+            msgspray
+            sham.txt
