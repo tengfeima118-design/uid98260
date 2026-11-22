@@ -98,7 +98,7 @@ static int uhid_destroy(int fd) {
     return write(fd, &ev, sizeof(ev)) == sizeof(ev) ? 0 : -1;
 }
 
-static void pump(int fd, long ms, int do_start) {
+static void pump(int fd, long ms) {
     long dl = now_ms() + ms;
     struct uhid_event ev;
     int fc = fcntl(fd, F_GETFL, 0);
@@ -106,15 +106,7 @@ static void pump(int fd, long ms, int do_start) {
     while (now_ms() < dl) {
         memset(&ev, 0, sizeof(ev));
         ssize_t n = read(fd, &ev, sizeof(ev));
-        if (n > 0 && ev.type == UHID_START) {
-            /* 收到 START 后回一个 OPENED，驱动才会开始发数据 */
-            struct uhid_event o;
-            memset(&o, 0, sizeof(o));
-            o.type = UHID_OPENED;
-            write(fd, &o, sizeof(o));
-        } else if (n <= 0) {
-            usleep(1000);
-        }
+        if (n <= 0) usleep(1000);
     }
     fcntl(fd, F_SETFL, fc);
 }
@@ -162,12 +154,12 @@ int main(int argc, char **argv) {
         long t0 = now_us();
         if (uhid_create(fdt, "lifo-touch", PHYS_COMMON, 0x1101,
                         rdesc_touch, sizeof(rdesc_touch)) < 0) { printf("create t fail\n"); return 5; }
-        pump(fdt, 200, 1);
+        pump(fdt, 200);
         if (uhid_create(fdp, "lifo-pad", PHYS_COMMON, 0x1102,
                         rdesc_pad, sizeof(rdesc_pad)) < 0) { printf("create p fail\n"); return 5; }
-        pump(fdp, 200, 1);
+        pump(fdp, 200);
         usleep(400000);   /* 等 wacom 绑定完成 */
-        pump(fdt, 50, 1); pump(fdp, 50, 1);
+        pump(fdt, 50); pump(fdp, 50);
         int n_ev = count_evdev();
         printf("round%d evdev_count=%d\n", rd, n_ev);
 
